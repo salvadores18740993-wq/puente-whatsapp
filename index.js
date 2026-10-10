@@ -6,18 +6,26 @@ app.use(express.json());
 // URL de tu PocketBase en Railway
 const POCKETBASE_URL = 'https://pocketbase-production-1467.up.railway.app';
 
+// ⚠️ Tu API Key de Gemini (la que copiaste en el Paso 1)
+// La pondremos como variable de entorno en Render por seguridad
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Catálogo de productos (ajústalo con tus productos reales)
+const CATALOGO = `
+- Harina P.A.N. ($2.00)
+- Agua 50 ml ($2.00)
+- Harina de trigo Mary ($1.50)
+`;
+
 // Ruta raíz para verificar que el servidor está vivo
 app.get('/', (req, res) => {
-    res.send('Puente WhatsApp-POS funcionando correctamente ✅');
+    res.send('Puente WhatsApp-POS con IA funcionando correctamente ✅');
 });
 
 // Ruta que recibe los mensajes de Evolution API
 app.post('/webhook', async (req, res) => {
     const data = req.body;
-    console.log('=== MENSAJE RECIBIDO ===');
-    console.log(JSON.stringify(data, null, 2));
 
-    // Detectar si es un mensaje nuevo que NO sea nuestro
     const esMensajeNuevo = data.event === 'messages.upsert';
     const noEsMio = data.data && data.data.key && data.data.key.fromMe === false;
 
@@ -28,32 +36,62 @@ app.post('/webhook', async (req, res) => {
         const nombre = msg.pushName || 'Cliente WhatsApp';
         const telefono = remitente.split('@')[0];
 
-        console.log('📩 Procesando pedido de:', nombre, '| Teléfono:', telefono, '| Texto:', texto);
+        console.log('📩 Mensaje recibido de:', nombre, '| Texto:', texto);
 
         try {
+            // 1. Enviar el mensaje a Gemini para que lo interprete
+            const prompt = `Eres un asistente de pedidos de una tienda. Estos son los productos disponibles:\n${CATALOGO}\n\nEl cliente dice: "${texto}"\n\nResponde ÚNICAMENTE con un JSON con este formato exacto: {"items": [{"name": "nombre del producto", "quantity": 1, "price": 2.00}], "total": 2.00}. Si no entiendes el pedido, responde: {"error": "No se entendió el pedido"}. No agregues texto adicional, solo el JSON.`;
+
+            const geminiResponse = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+                {
+                    contents: [{ parts: [{ text: prompt }] }]
+                }
+            );
+
+            const respuestaIA = geminiResponse.data.candidates[0].content.parts[0].text.trim();
+            console.log('🤖 Respuesta de Gemini:', respuestaIA);
+
+            // 2. Extraer el JSON de la respuesta de la IA
+            const jsonMatch = respuestaIA.match(/\{.*\}/s);
+            if (!jsonMatch) {
+                console.error('❌ La IA no devolvió un JSON válido.');
+                return res.status(200).send('OK');
+            }
+
+            const pedido = JSON.parse(jsonMatch[0]);
+
+            if (pedido.error) {
+                console.error('❌ La IA no entendió el pedido:', pedido.error);
+                return res.status(200).send('OK');
+            }
+
+            // 3. Crear el pedido en PocketBase con los datos estructurados
             await axios.post(`${POCKETBASE_URL}/api/collections/orders/records`, {
                 orderNumber: 'WA-' + Date.now().toString().slice(-6),
                 customerName: nombre,
                 customerPhone: telefono,
-                items: JSON.stringify([{ name: texto, quantity: 1, price: 0 }]),
-                totalUsd: 0,
-                totalBs: 0,
+                items: JSON.stringify(pedido.items),
+                totalUsd: pedido.total,
+                totalBs: pedido.total * 874.73, // Ajusta con tu tasa
                 method: 'efectivo',
                 status: 'pendiente',
-                notes: 'Pedido recibido por WhatsApp',
+                notes: 'Pedido procesado por IA',
                 date: new Date().toLocaleString('es-VE', { timeZone: 'America/Caracas' }),
                 timestamp: new Date().toISOString()
             });
-            console.log('✅ Pedido creado exitosamente para:', nombre);
+
+            console.log('✅ Pedido creado exitosamente para:', nombre, '| Total:', pedido.total);
+
         } catch (error) {
-            console.error('❌ Error al crear el pedido en PocketBase:');
+            console.error('❌ Error al procesar el pedido:');
             console.error('Mensaje:', error.message);
             if (error.response) {
                 console.error('Respuesta del servidor:', JSON.stringify(error.response.data, null, 2));
             }
         }
     } else {
-        console.log('⏭️  Evento ignorado (no es mensaje nuevo o es enviado por nosotros mismos).');
+        console.log('⏭️ Evento ignorado.');
     }
 
     res.status(200).send('OK');
