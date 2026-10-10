@@ -6,7 +6,7 @@ app.use(express.json());
 const POCKETBASE_URL = 'https://pocketbase-production-1467.up.railway.app';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const EVOLUTION_URL = 'https://latest-evolution-api-production-dd74.up.railway.app';
-const EVOLUTION_KEY = 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; // Tu API Key de Evolution
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; // Mejor usar variable de entorno en Render
 
 // ==================== ⚙️ CONFIGURA TUS DATOS DE PAGO MÓVIL ====================
 const DATOS_PAGO_MOVIL = `
@@ -56,6 +56,36 @@ async function saveSession(id, data) {
     } catch (e) { console.error('Error guardando sesión:', e.message); }
 }
 
+// ==================== FUNCIÓN CON REINTENTOS PARA GEMINI (Evita error 503) ====================
+async function callGeminiWithRetry(prompt, maxRetries = 5) {
+    let attempt = 0;
+    while (attempt < maxRetries) {
+        try {
+            const response = await axios.post(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`,
+                { contents: [{ parts: [{ text: prompt }] }] },
+                { timeout: 15000 } // Timeout de 15 segundos
+            );
+            return response;
+        } catch (error) {
+            attempt++;
+            const status = error.response?.status;
+            // 503 = Servicio no disponible (saturación), 429 = Límite de cuota excedido
+            const isRetryable = status === 503 || status === 429;
+
+            if (isRetryable && attempt < maxRetries) {
+                // Retroceso exponencial: 2s, 4s, 8s, 16s...
+                const delay = Math.pow(2, attempt) * 1000;
+                console.warn(`⚠️ Error ${status} de Gemini. Reintentando en ${delay}ms... (Intento ${attempt}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                console.error(`❌ Error definitivo tras ${attempt} intentos:`, error.message);
+                throw error; // Si no es recuperable o se agotaron los intentos, lanzamos el error
+            }
+        }
+    }
+}
+
 // ==================== WEBHOOK ====================
 
 app.get('/', (req, res) => res.send('Bot POS con IA ✅'));
@@ -82,26 +112,45 @@ app.post('/webhook', async (req, res) => {
         // ----- FLUJO SEGÚN ESTADO -----
 
         if (state === 'nuevo' || !session) {
-            // 1. Interpretar el pedido con IA
+            // 1. Interpretar el pedido con IA (CON REINTENTOS)
             const prompt = `Eres un asistente. Productos:\n${CATALOGO}\n\nCliente: "${texto}"\n\nResponde solo JSON: {"items": [{"name": "...", "quantity": 1, "price": 2.00}], "total": 2.00}. Si no es un pedido: {"error": "no_pedido"}`;
-            const ai = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`, { contents: [{ parts: [{ text: prompt }] }] });
+            
+            let ai;
+            try {
+                ai = await callGeminiWithRetry(prompt);
+            } catch (err) {
+                // Si Gemini falla definitivamente tras los reintentos, avisamos al cliente y salimos
+                await enviarMensajeWhatsApp(telefono, `Lo siento ${nombre}, en este momento estamos experimentando alta demanda. Por favor, intenta de nuevo en unos minutos. 🙏`);
+                return res.status(200).send('OK');
+            }
+
             const respuesta = ai.data.candidates[0].content.parts[0].text.trim();
-            const jsonMatch = respuesta.match(/\{.*\}/s);
-            const pedido = JSON.parse(jsonMatch[0]);
+            
+            // 2. Parsear respuesta de forma segura
+            let pedido;
+            try {
+                const jsonMatch = respuesta.match(/\{.*\}/s);
+                if (!jsonMatch) throw new Error('No se encontró JSON en la respuesta');
+                pedido = JSON.parse(jsonMatch[0]);
+            } catch (parseError) {
+                console.error('❌ Error parseando respuesta de IA:', respuesta);
+                await enviarMensajeWhatsApp(telefono, `Hola ${nombre} 👋 Tuve un problema entendiendo tu pedido. ¿Podrías escribirlo de nuevo de forma más sencilla?`);
+                return res.status(200).send('OK');
+            }
 
             if (pedido.error) {
                 await enviarMensajeWhatsApp(telefono, `Hola ${nombre} 👋 ¿En qué podemos ayudarte?`);
                 return res.status(200).send('OK');
             }
 
-            // 2. Crear el pedido
+            // 3. Crear el pedido en PocketBase
             const nuevoPedido = await axios.post(`${POCKETBASE_URL}/api/collections/orders/records`, {
                 orderNumber: 'WA-' + Date.now().toString().slice(-6),
                 customerName: nombre,
                 customerPhone: telefono,
                 items: JSON.stringify(pedido.items),
                 totalUsd: pedido.total,
-                totalBs: pedido.total * 874.73,
+                totalBs: pedido.total * 874.73, // ⚠️ Recomiendo usar la tasa dinámica de PocketBase aquí si es posible
                 method: 'efectivo',
                 status: 'pendiente',
                 notes: 'Pedido WhatsApp',
@@ -111,14 +160,14 @@ app.post('/webhook', async (req, res) => {
             orderId = nuevoPedido.data.id;
             console.log('✅ Pedido creado:', orderId);
 
-            // 3. Guardar sesión en espera de dirección
+            // 4. Guardar sesión en espera de dirección
             if (session) {
                 await saveSession(session.id, { state: 'esperando_direccion', orderId: orderId, extraData: '' });
             } else {
                 await saveSession(null, { phone: telefono, state: 'esperando_direccion', orderId: orderId, extraData: '' });
             }
 
-            // 4. Enviar saludo y pedir dirección
+            // 5. Enviar saludo y pedir dirección
             await enviarMensajeWhatsApp(telefono, `¡Hola ${nombre}! 👋 Gracias por tu pedido.\n\n📍 Por favor, envíanos tu *dirección de entrega* para continuar.`);
 
         } else if (state === 'esperando_direccion') {
@@ -157,7 +206,7 @@ app.post('/webhook', async (req, res) => {
         }
 
     } catch (error) {
-        console.error('❌ Error:', error.message);
+        console.error('❌ Error general en el webhook:', error.message);
         if (error.response) console.error('Respuesta:', JSON.stringify(error.response.data));
     }
 
