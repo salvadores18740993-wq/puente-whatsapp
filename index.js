@@ -6,8 +6,7 @@ app.use(express.json());
 // URL de tu PocketBase en Railway
 const POCKETBASE_URL = 'https://pocketbase-production-1467.up.railway.app';
 
-// ⚠️ Tu API Key de Gemini (la que copiaste en el Paso 1)
-// La pondremos como variable de entorno en Render por seguridad
+// Tu API Key de Gemini (se lee desde las variables de entorno de Render)
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // Catálogo de productos (ajústalo con tus productos reales)
@@ -43,7 +42,7 @@ app.post('/webhook', async (req, res) => {
             const prompt = `Eres un asistente de pedidos de una tienda. Estos son los productos disponibles:\n${CATALOGO}\n\nEl cliente dice: "${texto}"\n\nResponde ÚNICAMENTE con un JSON con este formato exacto: {"items": [{"name": "nombre del producto", "quantity": 1, "price": 2.00}], "total": 2.00}. Si no entiendes el pedido, responde: {"error": "No se entendió el pedido"}. No agregues texto adicional, solo el JSON.`;
 
             const geminiResponse = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
                 {
                     contents: [{ parts: [{ text: prompt }] }]
                 }
@@ -73,7 +72,7 @@ app.post('/webhook', async (req, res) => {
                 customerPhone: telefono,
                 items: JSON.stringify(pedido.items),
                 totalUsd: pedido.total,
-                totalBs: pedido.total * 874.73, // Ajusta con tu tasa
+                totalBs: pedido.total * 874.73,
                 method: 'efectivo',
                 status: 'pendiente',
                 notes: 'Pedido procesado por IA',
