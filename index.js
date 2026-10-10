@@ -3,25 +3,52 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
+// ==================== CONFIGURACIÓN ====================
 const POCKETBASE_URL = 'https://pocketbase-production-1467.up.railway.app';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const EVOLUTION_URL = 'https://latest-evolution-api-production-dd74.up.railway.app';
-const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; // Mejor usar variable de entorno en Render
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; // Mejor usar variable de entorno
 
-// ==================== ⚙️ CONFIGURA TUS DATOS DE PAGO MÓVIL ====================
+// ==================== DATOS DE PAGO MÓVIL (¡REEMPLAZA CON LOS TUYOS!) ====================
 const DATOS_PAGO_MOVIL = `
 💳 *Datos para Pago Móvil:*
 Banco: Banesco (0134)
 Teléfono: 0414-0000000
 RIF/Cédula: V-00000000
 `;
-// =============================================================================
+// =====================================================================================
 
 const CATALOGO = `
 - Harina P.A.N. ($2.00)
 - Agua 50 ml ($2.00)
 - Harina de trigo Mary ($1.50)
 `;
+
+// ==================== AUTENTICACIÓN CON POCKETBASE ====================
+let pbToken = null;
+const PB_BOT_EMAIL = 'bot@tusistema.com';
+const PB_BOT_PASSWORD = 'Yanaina-28$'; // 
+
+async function loginToPocketBase() {
+    try {
+        const res = await axios.post(`${POCKETBASE_URL}/api/collections/users/auth-with-password`, {
+            identity: PB_BOT_EMAIL,
+            password: PB_BOT_PASSWORD
+        });
+        pbToken = res.data.token;
+        console.log('✅ Bot autenticado en PocketBase exitosamente');
+    } catch (e) {
+        console.error('❌ Error autenticando bot en PocketBase:', e.message);
+    }
+}
+
+// Llamar al iniciar
+loginToPocketBase();
+
+// Helper para cabeceras de PocketBase
+const pbHeaders = () => ({
+    headers: { 'Authorization': `Bearer ${pbToken}` }
+});
 
 // ==================== FUNCIONES AUXILIARES ====================
 
@@ -41,22 +68,30 @@ async function enviarMensajeWhatsApp(numero, texto) {
 
 async function getSession(phone) {
     try {
-        const res = await axios.get(`${POCKETBASE_URL}/api/collections/chat_sessions/records?filter=(phone='${phone}')`);
+        const res = await axios.get(
+            `${POCKETBASE_URL}/api/collections/chat_sessions/records?filter=(phone='${phone}')`,
+            pbHeaders()
+        );
         return res.data.items.length > 0 ? res.data.items[0] : null;
-    } catch (e) { return null; }
+    } catch (e) {
+        console.error('Error obteniendo sesión:', e.message);
+        return null;
+    }
 }
 
 async function saveSession(id, data) {
     try {
         if (id) {
-            await axios.patch(`${POCKETBASE_URL}/api/collections/chat_sessions/records/${id}`, data);
+            await axios.patch(`${POCKETBASE_URL}/api/collections/chat_sessions/records/${id}`, data, pbHeaders());
         } else {
-            await axios.post(`${POCKETBASE_URL}/api/collections/chat_sessions/records`, data);
+            await axios.post(`${POCKETBASE_URL}/api/collections/chat_sessions/records`, data, pbHeaders());
         }
-    } catch (e) { console.error('Error guardando sesión:', e.message); }
+    } catch (e) {
+        console.error('Error guardando sesión:', e.message);
+    }
 }
 
-// ==================== FUNCIÓN CON REINTENTOS PARA GEMINI (Evita error 503) ====================
+// ==================== FUNCIÓN CON REINTENTOS PARA GEMINI ====================
 async function callGeminiWithRetry(prompt, maxRetries = 5) {
     let attempt = 0;
     while (attempt < maxRetries) {
@@ -64,23 +99,21 @@ async function callGeminiWithRetry(prompt, maxRetries = 5) {
             const response = await axios.post(
                 `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`,
                 { contents: [{ parts: [{ text: prompt }] }] },
-                { timeout: 15000 } // Timeout de 15 segundos
+                { timeout: 15000 }
             );
             return response;
         } catch (error) {
             attempt++;
             const status = error.response?.status;
-            // 503 = Servicio no disponible (saturación), 429 = Límite de cuota excedido
             const isRetryable = status === 503 || status === 429;
 
             if (isRetryable && attempt < maxRetries) {
-                // Retroceso exponencial: 2s, 4s, 8s, 16s...
-                const delay = Math.pow(2, attempt) * 1000;
+                const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s...
                 console.warn(`⚠️ Error ${status} de Gemini. Reintentando en ${delay}ms... (Intento ${attempt}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } else {
                 console.error(`❌ Error definitivo tras ${attempt} intentos:`, error.message);
-                throw error; // Si no es recuperable o se agotaron los intentos, lanzamos el error
+                throw error;
             }
         }
     }
@@ -119,7 +152,6 @@ app.post('/webhook', async (req, res) => {
             try {
                 ai = await callGeminiWithRetry(prompt);
             } catch (err) {
-                // Si Gemini falla definitivamente tras los reintentos, avisamos al cliente y salimos
                 await enviarMensajeWhatsApp(telefono, `Lo siento ${nombre}, en este momento estamos experimentando alta demanda. Por favor, intenta de nuevo en unos minutos. 🙏`);
                 return res.status(200).send('OK');
             }
@@ -150,13 +182,13 @@ app.post('/webhook', async (req, res) => {
                 customerPhone: telefono,
                 items: JSON.stringify(pedido.items),
                 totalUsd: pedido.total,
-                totalBs: pedido.total * 874.73, // ⚠️ Recomiendo usar la tasa dinámica de PocketBase aquí si es posible
+                totalBs: pedido.total * 874.73, // ⚠️ Idealmente usa la tasa dinámica desde settings
                 method: 'efectivo',
                 status: 'pendiente',
                 notes: 'Pedido WhatsApp',
                 date: new Date().toLocaleString('es-VE', { timeZone: 'America/Caracas' }),
                 timestamp: new Date().toISOString()
-            });
+            }, pbHeaders());
             orderId = nuevoPedido.data.id;
             console.log('✅ Pedido creado:', orderId);
 
@@ -174,7 +206,7 @@ app.post('/webhook', async (req, res) => {
             // Guardar dirección y pedir método de pago
             await axios.patch(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`, {
                 notes: `Dirección: ${texto}`
-            });
+            }, pbHeaders());
             await saveSession(session.id, { state: 'esperando_metodo', extraData: texto });
 
             await enviarMensajeWhatsApp(telefono, `Perfecto ✅\n\n¿Cómo deseas pagar?\n\n1️⃣ *Pago Móvil*\n2️⃣ *Efectivo* (al recibir)\n\nResponde con el número o el nombre.`);
@@ -185,7 +217,7 @@ app.post('/webhook', async (req, res) => {
                 await saveSession(session.id, { state: 'esperando_referencia' });
                 await enviarMensajeWhatsApp(telefono, `${DATOS_PAGO_MOVIL}\n\nPor favor, envía el *número de referencia* cuando realices el pago.`);
             } else if (eleccion.includes('2') || eleccion.includes('efectivo')) {
-                await axios.patch(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`, { method: 'efectivo' });
+                await axios.patch(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`, { method: 'efectivo' }, pbHeaders());
                 await saveSession(session.id, { state: 'completado' });
                 await enviarMensajeWhatsApp(telefono, `✅ Perfecto. Tu pedido se pagará en *efectivo* al recibir.\n\n¡Gracias por tu compra! Tu pedido ya está en preparación. 🛵`);
             } else {
@@ -197,7 +229,7 @@ app.post('/webhook', async (req, res) => {
             await axios.patch(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`, {
                 method: 'pagomovil',
                 extra: JSON.stringify({ ref: texto.slice(-4) })
-            });
+            }, pbHeaders());
             await saveSession(session.id, { state: 'completado' });
             await enviarMensajeWhatsApp(telefono, `✅ Referencia recibida. ¡Gracias por tu compra! Tu pedido ya está en preparación. 🛵`);
 
@@ -219,7 +251,7 @@ app.post('/notify-despachado', async (req, res) => {
     const { orderId } = req.body;
     if (!orderId) return res.status(400).send('Falta orderId');
     try {
-        const r = await axios.get(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`);
+        const r = await axios.get(`${POCKETBASE_URL}/api/collections/orders/records/${orderId}`, pbHeaders());
         const pedido = r.data;
         const mensaje = `🛵 ¡Buenas noticias ${pedido.customerName}!\n\nTu pedido *#${pedido.orderNumber}* va en camino. 🚀\n\n¡Gracias por tu compra!`;
         await enviarMensajeWhatsApp(pedido.customerPhone, mensaje);
