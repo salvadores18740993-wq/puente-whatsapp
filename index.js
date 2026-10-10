@@ -7,7 +7,7 @@ app.use(express.json());
 const POCKETBASE_URL = 'https://pocketbase-production-1467.up.railway.app';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const EVOLUTION_URL = 'https://latest-evolution-api-production-dd74.up.railway.app';
-const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; // Mejor usar variable de entorno
+const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || 'FDA03F3B8BA3-4D57-8039-1B6F3F53D890'; 
 
 // ==================== DATOS DE PAGO MÓVIL (¡REEMPLAZA CON LOS TUYOS!) ====================
 const DATOS_PAGO_MOVIL = `
@@ -27,7 +27,7 @@ const CATALOGO = `
 // ==================== AUTENTICACIÓN CON POCKETBASE ====================
 let pbToken = null;
 const PB_BOT_EMAIL = 'bot@tusistema.com';
-const PB_BOT_PASSWORD = 'Yanaina-28$'; // 
+const PB_BOT_PASSWORD = 'Yanaina-28$'; // ⚠️ CONTRASEÑA DEL BOT
 
 async function loginToPocketBase() {
     try {
@@ -42,10 +42,8 @@ async function loginToPocketBase() {
     }
 }
 
-// Llamar al iniciar
 loginToPocketBase();
 
-// Helper para cabeceras de PocketBase
 const pbHeaders = () => ({
     headers: { 'Authorization': `Bearer ${pbToken}` }
 });
@@ -108,7 +106,7 @@ async function callGeminiWithRetry(prompt, maxRetries = 5) {
             const isRetryable = status === 503 || status === 429;
 
             if (isRetryable && attempt < maxRetries) {
-                const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s...
+                const delay = Math.pow(2, attempt) * 1000;
                 console.warn(`⚠️ Error ${status} de Gemini. Reintentando en ${delay}ms... (Intento ${attempt}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } else {
@@ -144,7 +142,8 @@ app.post('/webhook', async (req, res) => {
 
         // ----- FLUJO SEGÚN ESTADO -----
 
-        if (state === 'nuevo' || !session) {
+        // ✅ CAMBIO CLAVE: Se añadió "state === 'completado'" para permitir nuevos pedidos
+        if (state === 'nuevo' || state === 'completado' || !session) {
             // 1. Interpretar el pedido con IA (CON REINTENTOS)
             const prompt = `Eres un asistente. Productos:\n${CATALOGO}\n\nCliente: "${texto}"\n\nResponde solo JSON: {"items": [{"name": "...", "quantity": 1, "price": 2.00}], "total": 2.00}. Si no es un pedido: {"error": "no_pedido"}`;
             
@@ -182,7 +181,7 @@ app.post('/webhook', async (req, res) => {
                 customerPhone: telefono,
                 items: JSON.stringify(pedido.items),
                 totalUsd: pedido.total,
-                totalBs: pedido.total * 874.73, // ⚠️ Idealmente usa la tasa dinámica desde settings
+                totalBs: pedido.total * 874.73, 
                 method: 'efectivo',
                 status: 'pendiente',
                 notes: 'Pedido WhatsApp',
