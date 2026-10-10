@@ -42,7 +42,7 @@ app.post('/webhook', async (req, res) => {
             const prompt = `Eres un asistente de pedidos de una tienda. Estos son los productos disponibles:\n${CATALOGO}\n\nEl cliente dice: "${texto}"\n\nResponde ÚNICAMENTE con un JSON con este formato exacto: {"items": [{"name": "nombre del producto", "quantity": 1, "price": 2.00}], "total": 2.00}. Si no entiendes el pedido, responde: {"error": "No se entendió el pedido"}. No agregues texto adicional, solo el JSON.`;
 
             const geminiResponse = await axios.post(
-                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${GEMINI_API_KEY}`,
                 {
                     contents: [{ parts: [{ text: prompt }] }]
                 }
